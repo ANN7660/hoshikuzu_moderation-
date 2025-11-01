@@ -1,0 +1,15 @@
+{pkgs}: {
+  deps = [
+    pkgs.python311
+    pkgs.python311Packages.pip
+  ];
+}
+```
+
+## 4. Vérifiez la structure du projet
+```
+votre-projet/
+├── main.py (le code du bot)
+├── requirements.txt
+├── .env (avec DISCORD_TOKEN=votre_token)
+└── .replit (si vous utilisez Replit)
