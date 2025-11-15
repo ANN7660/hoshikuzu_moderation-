@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Hoshikuzu_moderation_embed.py
 # Bot de modération avec embeds stylés, timeout (mute natif), clear, kick, ban, unban
+# + Système de rôle automatique basé sur le statut personnalisé
 # Requires: discord.py==2.3.2
 # Configure DISCORD_BOT_TOKEN in environment variables before running.
 
@@ -32,8 +33,29 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.guilds = True
+intents.presences = True  # Requis pour détecter les changements de statut
 
 bot = commands.Bot(command_prefix="+", intents=intents, help_command=None)
+
+# -------------------- Configuration storage --------------------
+CONFIG_FILE = "status_roles.json"
+
+def load_config():
+    """Charge la configuration des rôles de statut"""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            pass
+    return {}
+
+def save_config(config):
+    """Sauvegarde la configuration des rôles de statut"""
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+
+status_config = load_config()
 
 # -------------------- Utilities --------------------
 def parse_duration(s: str) -> Optional[int]:
@@ -98,8 +120,172 @@ async def help_cmd(ctx: commands.Context):
     embed.add_field(name="✅ Unban", value="`+unban <user_id>` - Débannir un utilisateur", inline=False)
     embed.add_field(name="🔇 Mute", value="`+mute <user|id|@mention> <durée>` - Timeout temporaire (ex: 10m, 1h)", inline=False)
     embed.add_field(name="🔊 Unmute", value="`+unmute <user|id|@mention>` - Annuler un timeout", inline=False)
+    embed.add_field(name="🌟 Status Role", value="`+setstatus <@role> <texte>` - Donne un rôle aux membres avec un statut contenant le texte\n`+removestatus <texte>` - Retire la config d'un statut\n`+liststatus` - Voir les statuts configurés", inline=False)
     embed.set_footer(text="Hoshikuzu | +help 🌙")
     await ctx.send(embed=embed)
+
+# -------------------- Status Role System --------------------
+@bot.command(name="setstatus")
+@commands.has_permissions(manage_roles=True)
+async def setstatus_cmd(ctx: commands.Context, role: discord.Role = None, *, status_text: str = None):
+    """Configure un rôle à donner automatiquement quand un membre met un certain texte dans son statut"""
+    if not role or not status_text:
+        return await ctx.send(embed=error_embed("Usage manquant", "❌ Utilisation : `+setstatus <@role> <texte du statut>`\n\nExemple : `+setstatus @Hoshikuzu /hoshikuzu`"))
+    
+    guild_id = str(ctx.guild.id)
+    if guild_id not in status_config:
+        status_config[guild_id] = {}
+    
+    # Normaliser le texte du statut (minuscules pour comparaison)
+    status_key = status_text.lower().strip()
+    
+    status_config[guild_id][status_key] = {
+        "role_id": role.id,
+        "role_name": role.name,
+        "original_text": status_text
+    }
+    save_config(status_config)
+    
+    embed = embed_action(
+        discord.Color.purple(),
+        "Status Role Configuré",
+        f"🌟 Les membres qui mettent **{status_text}** dans leur statut recevront automatiquement le rôle {role.mention}\n\n"
+        f"💡 Le bot vérifiera si le statut contient ce texte (insensible à la casse)."
+    )
+    await ctx.send(embed=embed)
+    
+    # Applique immédiatement aux membres existants
+    applied_count = 0
+    for member in ctx.guild.members:
+        if await check_and_apply_status_role(member):
+            applied_count += 1
+    
+    if applied_count > 0:
+        await ctx.send(f"✅ Rôle appliqué à {applied_count} membre(s) existant(s) !", delete_after=5)
+
+@bot.command(name="removestatus")
+@commands.has_permissions(manage_roles=True)
+async def removestatus_cmd(ctx: commands.Context, *, status_text: str = None):
+    """Retire la configuration d'un statut"""
+    if not status_text:
+        return await ctx.send(embed=error_embed("Usage manquant", "❌ Utilisation : `+removestatus <texte du statut>`"))
+    
+    guild_id = str(ctx.guild.id)
+    status_key = status_text.lower().strip()
+    
+    if guild_id not in status_config or status_key not in status_config[guild_id]:
+        return await ctx.send(embed=error_embed("Statut introuvable", f"❌ Aucune configuration trouvée pour : **{status_text}**"))
+    
+    role_name = status_config[guild_id][status_key]["role_name"]
+    del status_config[guild_id][status_key]
+    
+    if not status_config[guild_id]:
+        del status_config[guild_id]
+    
+    save_config(status_config)
+    
+    await ctx.send(embed=embed_action(
+        discord.Color.green(),
+        "Configuration Retirée",
+        f"✅ La configuration pour **{status_text}** (rôle: {role_name}) a été supprimée."
+    ))
+
+@bot.command(name="liststatus")
+async def liststatus_cmd(ctx: commands.Context):
+    """Liste tous les statuts configurés sur ce serveur"""
+    guild_id = str(ctx.guild.id)
+    
+    if guild_id not in status_config or not status_config[guild_id]:
+        return await ctx.send(embed=error_embed("Aucune configuration", "❌ Aucun statut n'est configuré sur ce serveur.\n\nUtilise `+setstatus <@role> <texte>` pour en créer un."))
+    
+    embed = discord.Embed(title="🌟 Statuts Configurés", color=discord.Color.purple())
+    
+    for status_text, config in status_config[guild_id].items():
+        role = ctx.guild.get_role(config["role_id"])
+        role_mention = role.mention if role else f"~~{config['role_name']}~~ (rôle supprimé)"
+        embed.add_field(
+            name=f"📝 {config['original_text']}", 
+            value=f"→ {role_mention}",
+            inline=False
+        )
+    
+    embed.set_footer(text="Les membres avec ces textes dans leur statut recevront automatiquement le rôle correspondant")
+    await ctx.send(embed=embed)
+
+async def check_and_apply_status_role(member: discord.Member) -> bool:
+    """Vérifie et applique le rôle de statut pour un membre"""
+    if member.bot:
+        return False
+    
+    guild_id = str(member.guild.id)
+    if guild_id not in status_config:
+        return False
+    
+    # Récupère le statut personnalisé du membre
+    custom_status = None
+    for activity in member.activities:
+        if isinstance(activity, discord.CustomActivity):
+            custom_status = activity.name
+            break
+    
+    if not custom_status:
+        # Pas de statut personnalisé, retire tous les rôles configurés
+        for config in status_config[guild_id].values():
+            role = member.guild.get_role(config["role_id"])
+            if role and role in member.roles:
+                try:
+                    await member.remove_roles(role, reason="Statut personnalisé retiré")
+                except:
+                    pass
+        return False
+    
+    custom_status_lower = custom_status.lower()
+    applied = False
+    
+    # Vérifie tous les statuts configurés
+    for status_text, config in status_config[guild_id].items():
+        role = member.guild.get_role(config["role_id"])
+        if not role:
+            continue
+        
+        # Si le statut contient le texte configuré
+        if status_text in custom_status_lower:
+            if role not in member.roles:
+                try:
+                    await member.add_roles(role, reason=f"Statut personnalisé contient: {config['original_text']}")
+                    applied = True
+                except:
+                    pass
+        else:
+            # Le statut ne contient plus le texte, retire le rôle
+            if role in member.roles:
+                try:
+                    await member.remove_roles(role, reason=f"Statut personnalisé ne contient plus: {config['original_text']}")
+                except:
+                    pass
+    
+    return applied
+
+@bot.event
+async def on_presence_update(before: discord.Member, after: discord.Member):
+    """Détecte les changements de statut et applique les rôles"""
+    # Vérifie si le statut personnalisé a changé
+    before_status = None
+    after_status = None
+    
+    for activity in before.activities:
+        if isinstance(activity, discord.CustomActivity):
+            before_status = activity.name
+            break
+    
+    for activity in after.activities:
+        if isinstance(activity, discord.CustomActivity):
+            after_status = activity.name
+            break
+    
+    # Si le statut a changé, vérifie et applique les rôles
+    if before_status != after_status:
+        await check_and_apply_status_role(after)
 
 # -------------------- Moderation commands --------------------
 @bot.command(name="clear")
@@ -247,6 +433,14 @@ async def on_ready():
     # Set bot status
     await bot.change_presence(activity=discord.Game("Hoshikuzu | +help"))
     print(f"[MOD BOT] connecté comme {bot.user} ({bot.user.id})")
+    
+    # Applique les rôles de statut aux membres existants au démarrage
+    for guild in bot.guilds:
+        guild_id = str(guild.id)
+        if guild_id in status_config:
+            print(f"[STATUS ROLES] Vérification des statuts pour {guild.name}...")
+            for member in guild.members:
+                await check_and_apply_status_role(member)
 
 # -------------------- Error handling --------------------
 @bot.event
